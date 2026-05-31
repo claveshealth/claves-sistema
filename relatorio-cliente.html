@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relatório de Andamento – Claves Health</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getFirestore, doc, getDoc } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+const app = initializeApp({
+  apiKey:"AIzaSyABAMCRg84FCvR0rULz1WfAOFqWRnZY3do",
+  authDomain:"claves-ats.firebaseapp.com",
+  projectId:"claves-ats",
+  storageBucket:"claves-ats.firebasestorage.app",
+  messagingSenderId:"668667602959",
+  appId:"1:668667602959:web:0720f2f71cc4b160ac9b7a"
+});
+const db = getFirestore(app);
+const REF = doc(db,"claves_ats","db");
+
+function esc(v){return (v||'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function fmt(d){return d?new Date(d+'T12:00:00').toLocaleDateString('pt-BR'):'—';}
+function show(s){['loading','invalid','report'].forEach(id=>{const el=document.getElementById('state-'+id);if(el)el.style.display=id===s?'block':'none';});}
+
+async function init(){
+  const repId = new URLSearchParams(location.search).get('rep');
+  if(!repId){show('invalid');return;}
+  try{
+    const snap = await getDoc(REF);
+    if(!snap.exists()){show('invalid');return;}
+    const data = JSON.parse(snap.data().payload||'{}');
+    const rep = (data.reports||[]).find(r=>r.id===repId);
+    if(!rep){show('invalid');return;}
+    const client = (data.clients||[]).find(c=>c.id===rep.clienteId)||null;
+    renderReport(rep, client);
+    show('report');
+  }catch(e){console.error(e);show('invalid');}
+}
+
+function renderReport(rep, client){
+  const logoUrl = 'https://claveshealth.github.io/claves-sistema/logo.png';
+  document.title = `Relatório – ${client?.nome||'Cliente'} – Claves Health`;
+
+  const kpis = [
+    ['Total de vagas abertas', rep.kpis?.vagas],
+    ['Contatos realizados', rep.kpis?.contatos],
+    ['Contatos que responderam', rep.kpis?.responderam],
+    ['Contatos sem o requisito necessário', rep.kpis?.semRequisito],
+    ['Profissionais encaminhados para o cliente', rep.kpis?.encaminhados],
+    ['Profissionais em negociação ativa', rep.kpis?.negociacao],
+    ['Profissionais contratados no período ou em processo de contratação', rep.kpis?.contratados],
+  ];
+
+  const enviadosRows = (rep.profissionaisEnviados||[]).map(p=>`
+    <tr><td>${esc(p.nome)}</td><td>${esc(p.especialidade)}</td><td>${fmt(p.dataEnvio)}</td><td><em>${esc(p.status)}</em></td></tr>`).join('');
+
+  const naoEfiRows = (rep.profissionaisNaoEfetivados||[]).map(p=>`
+    <tr><td>${esc(p.nome)}</td><td>${esc(p.especialidade)}</td><td>${fmt(p.dataEnvio)}</td><td><em>${esc(p.motivo)}</em></td></tr>`).join('');
+
+  document.getElementById('report-content').innerHTML = `
+    <div class="logo-row">
+      <img src="${logoUrl}" alt="Claves" class="logo-img">
+      <div class="logo-name">Claves</div>
+    </div>
+
+    <h1>Relatório de Andamento de Processo Seletivo – Claves Health</h1>
+    <div class="cliente-line">Cliente: <strong>${esc(client?.nome||'—')}</strong></div>
+    <div class="divider"></div>
+
+    <div class="periodo">Semana ${esc(rep.semana||'1')} — ${fmt(rep.dataInicio)} a ${fmt(rep.dataFim)}</div>
+
+    <table class="kpi-table">
+      <thead><tr><th>Indicador</th><th>Resultado</th></tr></thead>
+      <tbody>
+        ${kpis.map(([l,v])=>`<tr><td>${l}</td><td class="val">${v?'[ '+v+' ]':''}</td></tr>`).join('')}
+      </tbody>
+    </table>
+
+    ${(rep.motivosRecusa||[]).filter(Boolean).length?`
+    <h2>2- Motivos de Recusa</h2>
+    <ul class="dash-list">
+      ${(rep.motivosRecusa||[]).filter(Boolean).map(m=>`<li>${esc(m)}</li>`).join('')}
+    </ul>`:''}
+
+    ${(rep.avancos||[]).filter(Boolean).length?`
+    <h2>3- Principais avanços da semana</h2>
+    <ul class="check-list">
+      ${(rep.avancos||[]).filter(Boolean).map(a=>`<li>✅ ${esc(a)}</li>`).join('')}
+    </ul>`:''}
+
+    ${enviadosRows?`
+    <h2>4- Profissionais enviados</h2>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Nome</th><th>Especialidade</th><th>Data de envio</th><th>Data de início</th></tr></thead>
+      <tbody>${enviadosRows}</tbody>
+    </table></div>`:''}
+
+    ${naoEfiRows?`
+    <h2>5- Profissionais enviados, mas não efetivados</h2>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Nome</th><th>Especialidade</th><th>Data de envio</th><th>Motivo de não efetivação</th></tr></thead>
+      <tbody>${naoEfiRows}</tbody>
+    </table></div>`:''}
+
+    ${rep.proximosPassos?`
+    <h2>${(rep.profissionaisNaoEfetivados||[]).length?'6':'5'}- Próximos Passos</h2>
+    <div class="passos-text">${rep.proximosPassos.split('\n').map(l=>`<p>${esc(l)}</p>`).join('')}</div>`:''}
+
+    <div class="footer-bar">
+      <span>in linkedin.com/claveshealth</span>
+      <span>@claves_health</span>
+    </div>
+  `;
+}
+
+window.downloadPDF = function(){
+  window.print();
+}
+
+init();
+</script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;color:#1a2033;background:#f5f7fa;min-height:100vh}
+
+/* States */
+.center-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px}
+.center-card{background:#fff;border-radius:20px;padding:40px;max-width:400px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.1)}
+.spinner{width:36px;height:36px;border:3px solid #e2e8f0;border-top-color:#1A5C96;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Top bar */
+.top-bar{background:#0D1B2E;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+.top-bar-logo{display:flex;align-items:center;gap:10px;color:#fff;font-size:16px;font-weight:700}
+.top-bar-logo img{height:32px;object-fit:contain}
+.btn-dl{background:#1A5C96;color:#fff;border:none;padding:9px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;transition:.15s}
+.btn-dl:hover{background:#155480}
+
+/* Report body */
+.report-wrap{max-width:820px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.1);padding:52px;position:relative}
+.bg-shape{position:absolute;right:-80px;top:0;width:360px;height:100%;background:radial-gradient(ellipse at right,#e8f0ed 0%,transparent 70%);pointer-events:none;z-index:0}
+.report-wrap > *{position:relative;z-index:1}
+
+.logo-row{display:flex;align-items:center;gap:12px;margin-bottom:32px;padding-bottom:20px;border-bottom:2.5px solid #0D1B2E}
+.logo-img{height:44px;object-fit:contain}
+.logo-name{font-size:24px;font-weight:700;color:#0D1B2E;font-family:'DM Serif Display',serif}
+h1{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#0D1B2E;margin-bottom:8px;line-height:1.4}
+.cliente-line{font-size:13px;font-weight:600;color:#374151;margin-bottom:16px}
+.divider{height:1px;background:#e2e8f0;margin-bottom:24px}
+.periodo{font-size:13px;font-weight:700;color:#0D1B2E;margin-bottom:14px}
+
+/* KPI Table */
+.kpi-table{width:100%;border-collapse:collapse;margin-bottom:28px;font-size:13px}
+.kpi-table th{background:#c8ddd6;padding:10px 16px;text-align:left;font-weight:700;font-size:12px;color:#0D1B2E}
+.kpi-table td{padding:10px 16px;border-bottom:1px solid #e8f0ed;color:#374151}
+.kpi-table td.val{font-weight:700;color:#0D1B2E;text-align:right}
+
+/* Lists */
+h2{font-size:13px;font-weight:700;margin:24px 0 10px;color:#0D1B2E}
+.dash-list{list-style:none;padding:0;margin-bottom:20px}
+.dash-list li{padding:6px 0 6px 16px;border-bottom:1px solid #f1f5f9;font-size:13px;color:#374151;position:relative}
+.dash-list li::before{content:'—';position:absolute;left:0;color:#94a3b8}
+.check-list{list-style:none;padding:0;margin-bottom:20px}
+.check-list li{padding:6px 0;font-size:13px;color:#374151;border-bottom:1px solid #f1f5f9}
+
+/* Data tables */
+.table-wrap{overflow-x:auto;margin-bottom:24px}
+.data-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.data-table th{text-align:left;padding:9px 12px;background:#EBF3FA;color:#0D1B2E;font-size:11px;font-weight:700;border-bottom:2px solid #1A5C96;text-transform:uppercase;letter-spacing:.3px}
+.data-table td{padding:9px 12px;border-bottom:1px solid #f1f5f9;color:#374151}
+.data-table td em{font-style:italic;color:#64748b}
+
+/* Passos */
+.passos-text{font-size:13px;color:#374151;line-height:1.7;margin-bottom:24px}
+.passos-text p{margin-bottom:4px}
+
+/* Footer */
+.footer-bar{background:#0D1B2E;color:rgba(255,255,255,.7);padding:16px 24px;margin:-52px -52px 0;display:flex;justify-content:center;gap:48px;font-size:12px;margin-top:40px}
+
+@media(max-width:640px){
+  .report-wrap{margin:0;border-radius:0;padding:28px 20px}
+  .footer-bar{flex-direction:column;text-align:center;gap:8px}
+  .top-bar{padding:12px 16px}
+}
+
+@media print{
+  .top-bar{display:none}
+  body{background:#fff}
+  .report-wrap{box-shadow:none;border-radius:0;margin:0;padding:32px 40px}
+  .bg-shape{display:none}
+  .footer-bar{margin-left:-40px;margin-right:-40px}
+}
+</style>
+</head>
+<body>
+
+<div id="state-loading" class="center-screen">
+  <div class="center-card">
+    <div class="spinner"></div>
+    <p style="color:#94a3b8;font-size:14px">Carregando relatório...</p>
+  </div>
+</div>
+
+<div id="state-invalid" class="center-screen" style="display:none">
+  <div class="center-card">
+    <div style="font-size:48px;margin-bottom:16px">⚠️</div>
+    <h2 style="font-size:17px;font-weight:700;color:#0D1B2E;margin-bottom:8px">Relatório não encontrado</h2>
+    <p style="font-size:13px;color:#94a3b8">Este link pode estar incorreto ou o relatório foi removido.</p>
+  </div>
+</div>
+
+<div id="state-report" style="display:none">
+  <div class="top-bar">
+    <div class="top-bar-logo">
+      <img src="https://claveshealth.github.io/claves-sistema/logo.png" alt="Claves">
+      <span>Claves Health</span>
+    </div>
+    <button class="btn-dl" onclick="downloadPDF()">⬇ Baixar PDF</button>
+  </div>
+  <div class="report-wrap">
+    <div class="bg-shape"></div>
+    <div id="report-content"></div>
+  </div>
+</div>
+
+</body>
+</html>
