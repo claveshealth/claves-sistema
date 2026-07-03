@@ -16,7 +16,7 @@
 ═══════════════════════════════════════════════════ -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getFirestore, doc, setDoc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import { getFirestore, doc, collection, setDoc, getDoc, getDocs, deleteDoc, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
   import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
   const firebaseConfig = {
@@ -39,7 +39,9 @@
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
   const auth = getAuth(app);
-  const REF = doc(db, "claves_ats", "db");
+  // ── Estrutura nova: meta (clients/jobs/processes) + candidatos individuais
+  const META_REF = doc(db, "claves_ats", "meta");
+  const CANDS_COL = collection(db, "claves_candidates");
 
   window._fbLogin = async (email, password) => {
     try {
@@ -59,29 +61,88 @@
 
   window._fbLogout = async () => { await signOut(auth); };
 
+  // Salva meta (clients, jobs, processes) + cada candidato individualmente
   window._fbSave = async (data) => {
     try {
-      await setDoc(REF, { payload: JSON.stringify(data), ts: Date.now() });
+      const ts = Date.now();
+      const batch = writeBatch(db);
+      batch.set(META_REF, {
+        clients: data.clients || [],
+        jobs: data.jobs || [],
+        processes: data.processes || [],
+        ts
+      });
+      for (const cand of (data.candidates || [])) {
+        batch.set(doc(db, "claves_candidates", cand.id), { ...cand, _ts: ts });
+      }
+      await batch.commit();
       window._setSyncStatus("live");
+      // Backup automático no localStorage como fallback
+      try { localStorage.setItem('claves_ats3', JSON.stringify(data)); } catch(e) {}
     } catch(e) {
       console.error("Erro ao salvar:", e);
       window._setSyncStatus("error");
+      // Fallback: salvar local se Firestore falhar
+      try { localStorage.setItem('claves_ats3', JSON.stringify(data)); } catch(le) {}
     }
+  };
+
+  // Salva apenas um candidato (para updates individuais — mais rápido)
+  window._fbSaveCand = async (cand) => {
+    try {
+      await setDoc(doc(db, "claves_candidates", cand.id), { ...cand, _ts: Date.now() });
+    } catch(e) { console.error("Erro ao salvar candidato:", e); }
+  };
+
+  // Deleta candidato do Firestore
+  window._fbDeleteCand = async (id) => {
+    try { await deleteDoc(doc(db, "claves_candidates", id)); } catch(e) {}
   };
 
   window._fbLoad = async () => {
     try {
-      const snap = await getDoc(REF);
-      if (snap.exists()) return JSON.parse(snap.data().payload);
+      // Carregar meta
+      const metaSnap = await getDoc(META_REF);
+      const meta = metaSnap.exists() ? metaSnap.data() : { clients:[], jobs:[], processes:[] };
+      // Carregar candidatos individualmente
+      const candsSnap = await getDocs(CANDS_COL);
+      const candidates = [];
+      candsSnap.forEach(d => { const c = {...d.data()}; delete c._ts; candidates.push(c); });
+      // Migração automática do banco antigo se candidatos vazios
+      if (candidates.length === 0) {
+        const oldRef = doc(db, "claves_ats", "db");
+        const oldSnap = await getDoc(oldRef);
+        if (oldSnap.exists()) {
+          try {
+            const old = JSON.parse(oldSnap.data().payload);
+            if (old.candidates && old.candidates.length > 0) {
+              const batch = writeBatch(db);
+              for (const cand of old.candidates) {
+                batch.set(doc(db, "claves_candidates", cand.id), { ...cand, _ts: Date.now() });
+              }
+              await batch.commit();
+              return { clients: meta.clients||[], jobs: meta.jobs||[], processes: meta.processes||[], candidates: old.candidates };
+            }
+          } catch(e) {}
+        }
+        // Fallback: tentar localStorage
+        try {
+          const local = localStorage.getItem('claves_ats3');
+          if (local) {
+            const parsed = JSON.parse(local);
+            if (parsed.candidates && parsed.candidates.length > 0) return parsed;
+          }
+        } catch(e) {}
+      }
+      return { clients: meta.clients||[], jobs: meta.jobs||[], processes: meta.processes||[], candidates };
     } catch(e) { console.error("Erro ao carregar:", e); }
     return null;
   };
 
-  onSnapshot(REF, (snap) => {
+  onSnapshot(META_REF, (snap) => {
     if (!snap.exists()) return;
     try {
-      const incoming = JSON.parse(snap.data().payload);
-      if (window._onRemoteChange) window._onRemoteChange(incoming, snap.data().ts);
+      if (window._onRemoteChange) window._onRemoteChange(snap.data(), snap.data().ts);
     } catch(e) {}
   });
 
@@ -568,6 +629,7 @@ textarea.fi{resize:vertical;min-height:80px}
     <div class="nav-label">Vagas</div>
     <button class="nav-item" id="nav-jobs" onclick="go('jobs')"><i class="ti ti-file-description"></i>Descritivos<span class="nav-count" id="nc-jobs">0</span></button>
     <button class="nav-item" id="nav-reports" onclick="go('reports')"><i class="ti ti-chart-bar"></i>Relatórios</button>
+    <button class="nav-item" id="nav-import" onclick="go('import')"><i class="ti ti-file-import"></i>Importar dados</button>
   </div>
 </nav>
 <div class="content">
@@ -714,14 +776,20 @@ function saveLocal(){try{localStorage.setItem('claves_ats3',JSON.stringify(DB));
 async function saveDB(){
   saving=true;
   _setSyncStatus('saving');
+  saveLocal(); // sempre salva local como backup
   if(useFirebase){
     await window._fbSave(DB);
   } else {
-    saveLocal();
     _setSyncStatus('local');
   }
   saving=false;
   updateNavCounts();
+}
+
+// Salva apenas um candidato (aderência, etapa, etc.)
+async function saveDBCand(cand){
+  saveLocal();
+  if(useFirebase && window._fbSaveCand) await window._fbSaveCand(cand);
 }
 
 // Listener do Firebase — atualiza em tempo real quando outro usuário muda algo
@@ -914,7 +982,7 @@ function renderPage(page){
   document.getElementById('pgActions').innerHTML='';
   const c=document.getElementById('pageContent');
   if(page==='proc'&&currentProcId){renderProcDetail(c,currentProcId);return;}
-  const fns={dash:renderDash,cand:renderCandidates,proc:renderProcesses,client:renderClients,jobs:renderJobs,reports:renderReports};
+  const fns={dash:renderDash,cand:renderCandidates,proc:renderProcesses,client:renderClients,jobs:renderJobs,reports:renderReports,import:renderImportPage};
   if(fns[page])fns[page](c);
 }
 
@@ -1177,7 +1245,7 @@ async function saveCandidate(){
     });
   }
 }
-async function deleteCand(id){if(!confirm('Excluir candidato?'))return;DB.candidates=DB.candidates.filter(x=>x.id!==id);await saveDB();renderPage(currentPage);toast('Removido');}
+async function deleteCand(id){if(!confirm('Excluir candidato?'))return;DB.candidates=DB.candidates.filter(x=>x.id!==id);if(window._fbDeleteCand)await window._fbDeleteCand(id);await saveDB();renderPage(currentPage);toast('Removido');}
 
 function openCandPanel(id){
   const c=DB.candidates.find(x=>x.id===id);if(!c)return;
@@ -2633,6 +2701,118 @@ function exportContratadosPDF(){
   win.document.close();
 }
 
+
+// ── Importação de Dados ────────────────────────────────────────
+function renderImportPage(el){
+  el.innerHTML=`
+  <div style="max-width:800px;margin:0 auto;padding:20px">
+    <h2 style="color:var(--dark);margin-bottom:4px"><i class="ti ti-file-import"></i> Importar Candidatos</h2>
+    <p style="color:var(--gray-dk);margin-bottom:24px">Importe candidatos em lote via planilha Excel ou JSON. Baixe o modelo antes de preencher.</p>
+
+    <div style="background:#fff;border-radius:12px;padding:24px;margin-bottom:20px;box-shadow:var(--sh)">
+      <h3 style="margin-bottom:12px">📥 Baixar modelo Excel</h3>
+      <p style="font-size:13px;color:var(--gray-dk);margin-bottom:14px">Preencha o modelo com os dados dos candidatos e depois faça o upload abaixo.</p>
+      <button class="btn btn-outline btn-sm" onclick="baixarModeloExcel()"><i class="ti ti-download"></i> Baixar modelo .xlsx</button>
+    </div>
+
+    <div style="background:#fff;border-radius:12px;padding:24px;margin-bottom:20px;box-shadow:var(--sh)">
+      <h3 style="margin-bottom:12px">⬆ Importar planilha Excel</h3>
+      <input type="file" id="import-xlsx" accept=".xlsx,.xls,.csv" style="display:none" onchange="importarExcel(this)">
+      <button class="btn btn-primary btn-sm" onclick="document.getElementById('import-xlsx').click()"><i class="ti ti-file-spreadsheet"></i> Selecionar arquivo Excel</button>
+      <div id="import-preview" style="margin-top:16px"></div>
+    </div>
+
+    <div style="background:#fff;border-radius:12px;padding:24px;margin-bottom:20px;box-shadow:var(--sh)">
+      <h3 style="margin-bottom:12px">💾 Backup manual</h3>
+      <p style="font-size:13px;color:var(--gray-dk);margin-bottom:14px">Baixe um backup completo de todos os dados do sistema agora.</p>
+      <button class="btn btn-outline btn-sm" onclick="exportarBackup()"><i class="ti ti-download"></i> Baixar backup JSON</button>
+    </div>
+
+    <div style="background:#fff;border-radius:12px;padding:24px;box-shadow:var(--sh)">
+      <h3 style="margin-bottom:12px">📂 Restaurar backup JSON</h3>
+      <p style="font-size:13px;color:var(--gray-dk);margin-bottom:14px">Restaure um backup baixado anteriormente. Os dados serão mesclados com os atuais.</p>
+      <input type="file" id="import-json" accept=".json" style="display:none" onchange="restaurarBackup(this)">
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('import-json').click()"><i class="ti ti-file-import"></i> Selecionar backup JSON</button>
+      <div id="restore-status" style="margin-top:12px"></div>
+    </div>
+  </div>`;
+}
+
+function baixarModeloExcel(){
+  // Gerar CSV simples como modelo
+  const header = 'nome,cpf,tipo,especialidade,cfm,rqe,regiao,telefone,email,recrutador,obs';
+  const exemplo = 'João Silva,,Médico,Cardiologia,12345/DF,RQE 1234,Brasília - DF,(61) 99999-9999,joao@email.com,Débora,Observações aqui';
+  const blob = new Blob([header+'\n'+exemplo], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='modelo_candidatos.csv'; a.click();
+  toast('Modelo baixado ✓');
+}
+
+async function importarExcel(input){
+  const file = input.files[0]; if(!file) return;
+  const preview = document.getElementById('import-preview');
+  preview.innerHTML = '<p style="color:var(--gray-dk)">⏳ Lendo arquivo...</p>';
+  const text = await file.text();
+  const lines = text.split('\n').filter(l=>l.trim());
+  if(lines.length < 2){ preview.innerHTML='<p style="color:red">Arquivo vazio ou inválido.</p>'; return; }
+  const headers = lines[0].split(',').map(h=>h.trim().toLowerCase().replace(/[^a-z]/g,''));
+  const candidatos = [];
+  for(let i=1;i<lines.length;i++){
+    const vals = lines[i].split(',');
+    const obj = {id:uid(),etapa:'Triagem',pontuacao:0,processo:'',curriculoTexto:'',curriculo:'',aderencia:null};
+    headers.forEach((h,idx)=>{ if(vals[idx]!==undefined) obj[h]=vals[idx].trim(); });
+    if(obj.nome) candidatos.push(obj);
+  }
+  if(!candidatos.length){ preview.innerHTML='<p style="color:red">Nenhum candidato válido encontrado.</p>'; return; }
+  preview.innerHTML = `
+    <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:16px">
+      <p style="font-weight:600;color:#16a34a">✅ ${candidatos.length} candidato(s) encontrado(s)</p>
+      <p style="font-size:12px;color:#555;margin:8px 0">Prévia: ${candidatos.slice(0,3).map(c=>c.nome).join(', ')}${candidatos.length>3?'...':''}</p>
+      <button class="btn btn-primary btn-sm" onclick="confirmarImport(${JSON.stringify(candidatos).replace(/"/g,'&quot;')})">⬆ Confirmar importação</button>
+    </div>`;
+}
+
+async function confirmarImport(candidatos){
+  let novos=0;
+  for(const c of candidatos){
+    if(!DB.candidates.find(x=>x.nome===c.nome&&x.cfm===c.cfm)){
+      DB.candidates.push(c);
+      novos++;
+    }
+  }
+  await saveDB();
+  toast(\`✅ \${novos} candidato(s) importado(s) com sucesso!\`);
+  renderPage('import');
+}
+
+function exportarBackup(){
+  const blob = new Blob([JSON.stringify(DB, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url;
+  a.download='backup_claves_ats_'+new Date().toISOString().split('T')[0]+'.json';
+  a.click();
+  toast('Backup baixado ✓');
+}
+
+async function restaurarBackup(input){
+  const file = input.files[0]; if(!file) return;
+  const status = document.getElementById('restore-status');
+  try{
+    const text = await file.text();
+    const dados = JSON.parse(text);
+    const merge = (arr1,arr2)=>{const ids=new Set(arr1.map(x=>x.id));return [...arr1,...arr2.filter(x=>!ids.has(x.id))];};
+    DB.clients = merge(DB.clients||[], dados.clients||[]);
+    DB.jobs = merge(DB.jobs||[], dados.jobs||[]);
+    DB.processes = merge(DB.processes||[], dados.processes||[]);
+    DB.candidates = merge(DB.candidates||[], dados.candidates||[]);
+    await saveDB();
+    status.innerHTML=\`<p style="color:#16a34a;font-weight:600">✅ Backup restaurado! \${dados.candidates?.length||0} candidatos mesclados.</p>\`;
+    toast('Backup restaurado ✓');
+  }catch(e){
+    status.innerHTML='<p style="color:red">❌ Erro ao ler arquivo: '+e.message+'</p>';
+  }
+}
 
 // ── Relatórios de Clientes ────────────────────────────────────────
 
