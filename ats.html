@@ -101,21 +101,26 @@
 
   window._fbLoad = async () => {
     try {
-      // Carregar meta
-      const metaSnap = await getDoc(META_REF);
-      const meta = metaSnap.exists() ? metaSnap.data() : { clients:[], jobs:[], processes:[] };
-      // Carregar candidatos individualmente
-      const candsSnap = await getDocs(CANDS_COL);
+      // Sempre tentar banco antigo primeiro se meta não existe
+      const oldRef = doc(db, "claves_ats", "db");
+      const [metaSnap, oldSnap, candsSnap] = await Promise.all([
+        getDoc(META_REF),
+        getDoc(oldRef),
+        getDocs(CANDS_COL)
+      ]);
+
+      // Candidatos individuais (nova estrutura)
       const candidates = [];
       candsSnap.forEach(d => { const c = {...d.data()}; delete c._ts; candidates.push(c); });
-      // Migração automática do banco antigo se candidatos vazios
-      if (candidates.length === 0) {
-        const oldRef = doc(db, "claves_ats", "db");
-        const oldSnap = await getDoc(oldRef);
-        if (oldSnap.exists()) {
+
+      // Se meta existe, usar meta. Senão, migrar do banco antigo
+      if (metaSnap.exists()) {
+        const meta = metaSnap.data();
+        // Se não tem candidatos na nova estrutura mas tem no antigo, migrar
+        if (candidates.length === 0 && oldSnap.exists()) {
           try {
             const old = JSON.parse(oldSnap.data().payload);
-            if (old.candidates && old.candidates.length > 0) {
+            if (old.candidates?.length > 0) {
               const batch = writeBatch(db);
               for (const cand of old.candidates) {
                 batch.set(doc(db, "claves_candidates", cand.id), { ...cand, _ts: Date.now() });
@@ -123,18 +128,43 @@
               await batch.commit();
               return { clients: meta.clients||[], jobs: meta.jobs||[], processes: meta.processes||[], candidates: old.candidates };
             }
-          } catch(e) {}
+          } catch(e) { console.error("Erro na migração de candidatos:", e); }
         }
-        // Fallback: tentar localStorage
-        try {
-          const local = localStorage.getItem('claves_ats3');
-          if (local) {
-            const parsed = JSON.parse(local);
-            if (parsed.candidates && parsed.candidates.length > 0) return parsed;
-          }
-        } catch(e) {}
+        return { clients: meta.clients||[], jobs: meta.jobs||[], processes: meta.processes||[], candidates };
       }
-      return { clients: meta.clients||[], jobs: meta.jobs||[], processes: meta.processes||[], candidates };
+
+      // Meta não existe — migrar tudo do banco antigo
+      if (oldSnap.exists()) {
+        try {
+          const old = JSON.parse(oldSnap.data().payload);
+          console.log("Migrando banco antigo:", old.clients?.length, "clientes,", old.candidates?.length, "candidatos");
+          // Salvar meta novo
+          const batch = writeBatch(db);
+          batch.set(META_REF, {
+            clients: old.clients||[],
+            jobs: old.jobs||[],
+            processes: old.processes||[],
+            ts: Date.now()
+          });
+          // Salvar candidatos individualmente
+          for (const cand of (old.candidates||[])) {
+            batch.set(doc(db, "claves_candidates", cand.id), { ...cand, _ts: Date.now() });
+          }
+          await batch.commit();
+          return old;
+        } catch(e) { console.error("Erro na migração:", e); }
+      }
+
+      // Último fallback: localStorage
+      try {
+        const local = localStorage.getItem('claves_ats3');
+        if (local) {
+          const parsed = JSON.parse(local);
+          if (parsed.clients?.length > 0) return parsed;
+        }
+      } catch(e) {}
+
+      return { clients:[], jobs:[], processes:[], candidates:[] };
     } catch(e) { console.error("Erro ao carregar:", e); }
     return null;
   };
