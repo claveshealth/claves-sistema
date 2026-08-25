@@ -108,7 +108,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--gray);color:var
 
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import { getFirestore, doc, getDoc, setDoc } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 const app = initializeApp({
   apiKey:"AIzaSyABAMCRg84FCvR0rULz1WfAOFqWRnZY3do",
@@ -119,7 +119,9 @@ const app = initializeApp({
   appId:"1:668667602959:web:0720f2f71cc4b160ac9b7a"
 });
 const db = getFirestore(app);
-const REF = doc(db, "claves_ats", "db");
+const OLD_REF = doc(db, "claves_ats", "db");
+const META_REF = doc(db, "claves_ats", "meta");
+const CANDS_COL = collection(db, "claves_candidates");
 
 const QUESTIONS=[
   {id:1,d:'O',t:'Tenho curiosidade intelectual e gosto de explorar ideias novas.',r:false},
@@ -176,7 +178,7 @@ const QUESTIONS=[
 const DM={O:'Abertura',C:'Conscienc.',E:'Extroversão',A:'Amabilidade',N:'Neuroticismo'};
 const DC={O:'#8b5cf6',C:'#1d5fd4',E:'#d97706',A:'#059669',N:'#dc2626'};
 const answers={};
-let candidateId=null, candidateData=null;
+let candidateId=null, candidateData=null, candidateFormat='new';
 
 function show(s){
   ['loading','invalid','main','success'].forEach(id=>{
@@ -191,15 +193,46 @@ async function init(){
   candidateId = getParam('cand');
   if(!candidateId){ show('invalid'); return; }
   try{
-    const snap = await getDoc(REF);
-    if(!snap.exists()){ show('invalid'); return; }
-    const data = JSON.parse(snap.data().payload||'{}');
-    const cand = (data.candidates||[]).find(c=>c.id===candidateId);
+    let cand=null, procTitulo='Claves Health';
+
+    // 1. Tenta buscar na coleção nova claves_candidates
+    try{
+      const cSnap = await getDoc(doc(db,"claves_candidates",candidateId));
+      if(cSnap.exists()){
+        cand = {...cSnap.data()}; delete cand._ts;
+        candidateFormat='new';
+      }
+    }catch(e){ console.warn('busca nova falhou',e); }
+
+    // 2. Fallback: busca no formato antigo claves_ats/db
+    if(!cand){
+      const snap = await getDoc(OLD_REF);
+      if(snap.exists()){
+        const data = JSON.parse(snap.data().payload||'{}');
+        cand = (data.candidates||[]).find(c=>c.id===candidateId);
+        if(cand){
+          candidateFormat='old';
+          const proc=(data.processes||[]).find(p=>p.id===cand.processo);
+          if(proc) procTitulo=proc.titulo+' · Claves Health';
+        }
+      }
+    }
+
+    // 3. Busca o processo no meta (formato novo) para mostrar o título
+    if(cand && candidateFormat==='new' && cand.processo){
+      try{
+        const metaSnap=await getDoc(META_REF);
+        if(metaSnap.exists()){
+          const proc=(metaSnap.data().processes||[]).find(p=>p.id===cand.processo);
+          if(proc) procTitulo=proc.titulo+' · Claves Health';
+        }
+      }catch(e){}
+    }
+
     if(!cand){ show('invalid'); return; }
     candidateData = cand;
-    const proc = (data.processes||[]).find(p=>p.id===cand.processo);
     document.getElementById('cand-name').textContent = cand.nome||'—';
-    document.getElementById('cand-proc').textContent = proc ? proc.titulo+' · Claves Health' : 'Claves Health';
+    document.getElementById('cand-proc').textContent = procTitulo;
     document.getElementById('cand-banner').style.display = 'flex';
     document.getElementById('suc-name').textContent = cand.nome||'candidato(a)';
     buildQuestions();
@@ -247,15 +280,24 @@ window.submitBF = async function(){
   btn.disabled=true; btn.textContent='Enviando...';
   const scores=calcScores();
   try{
-    const snap=await getDoc(REF);
-    const raw=snap.data();
-    const data=JSON.parse(raw.payload||'{}');
-    const idx=(data.candidates||[]).findIndex(c=>c.id===candidateId);
-    if(idx<0) throw new Error('Candidato não encontrado');
-    data.candidates[idx].bigfive=scores;
-    data.candidates[idx].bigfiveDate=new Date().toISOString().split('T')[0];
-    data.candidates[idx].bigfiveRelatorio=null;
-    await setDoc(REF,{payload:JSON.stringify(data),ts:Date.now()});
+    const bfDate=new Date().toISOString().split('T')[0];
+
+    if(candidateFormat==='new'){
+      // Salva no documento individual da coleção claves_candidates
+      const updated={...candidateData, bigfive:scores, bigfiveDate:bfDate, bigfiveRelatorio:null, _ts:Date.now()};
+      await setDoc(doc(db,"claves_candidates",candidateId), updated);
+    } else {
+      // Formato antigo
+      const snap=await getDoc(OLD_REF);
+      const raw=snap.data();
+      const data=JSON.parse(raw.payload||'{}');
+      const idx=(data.candidates||[]).findIndex(c=>c.id===candidateId);
+      if(idx<0) throw new Error('Candidato não encontrado');
+      data.candidates[idx].bigfive=scores;
+      data.candidates[idx].bigfiveDate=bfDate;
+      data.candidates[idx].bigfiveRelatorio=null;
+      await setDoc(OLD_REF,{payload:JSON.stringify(data),ts:Date.now()});
+    }
     const lv=v=>v>=70?'Alto':v>=40?'Moderado':'Baixo';
     document.getElementById('ocean-result').innerHTML=
       ['O','C','E','A','N'].map(d=>`<div class="oc oc-${d}"><div class="oc-lbl">${DM[d]}</div><div class="oc-pct">${scores[d]}%</div><div class="oc-lv">${lv(scores[d])}</div></div>`).join('');
